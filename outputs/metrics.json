@@ -1,0 +1,21 @@
+{
+  "checkpoint": "/workspace/KnowledgeTracing/model/checkpoints/best.pt",
+  "test_auc": 0.7733611103991112,
+  "test_acc": 0.7197759855049445,
+  "config": {
+    "dataset": "assist2017",
+    "num_questions": 3162,
+    "max_step": 50,
+    "batch_size": 128,
+    "lr": 0.001,
+    "emb": 256,
+    "hidden": 128,
+    "layers": 1,
+    "kd_loss": 5e-06,
+    "epochs_cfg": 20,
+    "train_path": "/workspace/Dataset/assist2017/split_seed216/train.csv",
+    "valid_path": "/workspace/Dataset/assist2017/split_seed216/valid.csv",
+    "test_path": "/workspace/Dataset/assist2017/assist2017_pid_test.csv"
+  },
+  "test_chunks": 3630
+}

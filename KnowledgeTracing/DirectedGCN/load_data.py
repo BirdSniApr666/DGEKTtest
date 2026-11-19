@@ -12,10 +12,17 @@ import itertools
 import torch
 
 
-def get_adj():
+def get_adj(train_path=None):
+    """构建有向转移图（DTG）的出入邻接矩阵。
+
+    Args:
+        train_path: 用于统计交互转移的训练集 CSV。默认取 ``C.TRAIN_PATH``，
+            即 block 级切分后的训练集；**绝不能传入完整训练集**，否则验证集
+            的交互会泄漏进图结构中。
+    """
     q = C.NUM_OF_QUESTIONS
     resout = np.zeros((2 * q, 2 * q))
-    path = '../../Dataset/' + C.DATASET + '/' + C.DATASET + '_pid_train.csv'
+    path = train_path or C.TRAIN_PATH
 
     with open(path, 'r', encoding='UTF-8-sig') as train:
         for len, ques, _, ans in tqdm.tqdm(itertools.zip_longest(*[train] * 4), desc='Generate adjacency matrix:    ',

@@ -4,6 +4,16 @@
 # @File : dataloader.py
 # @Project: GOODKT
 # @Comment :
+"""数据加载。
+
+与原版差异：
+1. 数据路径统一从 ``Constants`` 的绝对路径常量取，不再依赖 cwd；
+2. 新增独立验证集 loader（block 级 90/10 切分产物）；
+3. 验证 / 测试集 ``drop_last=False``——评估不应丢弃最后不足一个 batch 的样本；
+   训练集保持 ``drop_last=True``（避免 BatchNorm/时序统计被极小 batch 干扰，
+   同时与原实现保持一致）。
+"""
+import os
 import sys
 
 sys.path.append('../')
@@ -13,39 +23,51 @@ from KnowledgeTracing.data.preprocess import DataReader
 from KnowledgeTracing.data.OneHot import OneHot
 
 
-def getTrainLoader(train_data_path):
-    handle = DataReader(train_data_path, C.MAX_STEP)
-    trainques, trainans = handle.getTrainData()
-    dtrain = OneHot(trainques, trainans)
-    trainLoader = Data.DataLoader(dtrain, batch_size=C.BATCH_SIZE, shuffle=True, drop_last=True)
-    return trainLoader
+def _build_loader(path, max_step, batch_size, shuffle, drop_last, desc):
+    handle = DataReader(path, max_step)
+    loader = getattr(handle, desc)()
+    dataset = OneHot(*loader)
+    return Data.DataLoader(dataset, batch_size=batch_size, shuffle=shuffle,
+                           drop_last=drop_last)
 
 
-def getTestLoader(test_data_path):
-    handle = DataReader(test_data_path, C.MAX_STEP)
-    testques, testans = handle.getTestData()
-    dtest = OneHot(testques, testans)
-    testLoader = Data.DataLoader(dtest, batch_size=C.BATCH_SIZE, shuffle=False, drop_last=True)
-    return testLoader
+def getTrainLoader(train_data_path=None):
+    return _build_loader(train_data_path or C.TRAIN_PATH, C.MAX_STEP,
+                         C.BATCH_SIZE, shuffle=True, drop_last=True,
+                         desc='getTrainData')
 
 
-def getLoader(dataset):
-    trainLoaders = []
-    testLoaders = []
-    if dataset == 'assist2009':
-        trainLoader = getTrainLoader(C.Dpath + '/assist2009/assist2009_pid_train.csv')
-        trainLoaders.append(trainLoader)
-        testLoader = getTestLoader(C.Dpath + '/assist2009/assist2009_pid_test.csv')
-        testLoaders.append(testLoader)
-    elif dataset == 'assist2017':
-        trainLoader = getTrainLoader(C.Dpath + '/assist2017/assist2017_pid_train.csv')
-        trainLoaders.append(trainLoader)
-        testLoader = getTestLoader(C.Dpath + '/assist2017/assist2017_pid_test.csv')
-        testLoaders.append(testLoader)
-    elif dataset == 'assistednet':
-        trainLoader = getTrainLoader(C.Dpath + '/assistednet/assistednet_pid_train.csv')
-        trainLoaders.append(trainLoader)
-        testLoader = getTestLoader(C.Dpath + '/assistednet/assistednet_pid_test.csv')
-        testLoaders.append(testLoader)
+def getValidLoader(valid_data_path=None):
+    """独立验证集：不参与训练，也不参与转移图构建。"""
+    path = valid_data_path or C.VALID_PATH
+    if not os.path.exists(path):
+        return None
+    return _build_loader(path, C.MAX_STEP, C.BATCH_SIZE,
+                         shuffle=False, drop_last=False, desc='getTestData')
 
-    return trainLoaders[0], testLoaders[0]
+
+def getTestLoader(test_data_path=None):
+    return _build_loader(test_data_path or C.TEST_PATH, C.MAX_STEP,
+                         C.BATCH_SIZE, shuffle=False, drop_last=False,
+                         desc='getTestData')
+
+
+def getLoader(dataset, train_path=None, valid_path=None, test_path=None,
+              use_valid=True):
+    """返回 ``(trainLoader, validLoader, testLoader)``；``use_valid=False`` 时 valid 为 None。"""
+    if dataset not in C.datasets:
+        raise ValueError(f'未知数据集: {dataset}')
+
+    if dataset == 'assist2017':
+        train_path = train_path or C.TRAIN_PATH
+        valid_path = valid_path or C.VALID_PATH
+        test_path = test_path or C.TEST_PATH
+    else:
+        base = os.path.join(C.Dpath, dataset)
+        train_path = train_path or os.path.join(base, f'{dataset}_pid_train.csv')
+        valid_path = valid_path or os.path.join(base, f'{dataset}_pid_valid.csv')
+        test_path = test_path or os.path.join(base, f'{dataset}_pid_test.csv')
+
+    return (getTrainLoader(train_path),
+            getValidLoader(valid_path) if use_valid else None,
+            getTestLoader(test_path))

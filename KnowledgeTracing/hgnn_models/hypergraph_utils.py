@@ -24,10 +24,11 @@ def generate_G_from_H(H, variable_weight=False):
     DV = np.sum(H *W, axis=1)
     # the degree of the hyperedge
     DE = np.sum(H, axis=0)
-    invDE = np.mat(np.diag(np.power(DE, float(-1))))
-    DV2 = np.mat(np.diag(np.power(DV, -0.5)))
-    W = np.mat(np.diag(W))
-    H = np.mat(H)
+    # np.mat 在 numpy>=2.0 已移除，np.asmatrix 是数值等价的替代（返回同一 np.matrix 视图）
+    invDE = np.asmatrix(np.diag(np.power(DE, float(-1))))
+    DV2 = np.asmatrix(np.diag(np.power(DV, -0.5)))
+    W = np.asmatrix(np.diag(W))
+    H = np.asmatrix(H)
     HT = H.T
 
     if variable_weight:

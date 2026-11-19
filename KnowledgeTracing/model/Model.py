@@ -19,7 +19,13 @@ class DKT(nn.Module):
         '''initial feature'''
         emb_dim = C.EMB
         emb = nn.Embedding(2 * C.NUM_OF_QUESTIONS, emb_dim)
-        self.ques = emb(torch.LongTensor([i for i in range(2 * C.NUM_OF_QUESTIONS)])).cuda()
+        # 原实现用普通 tensor 持有题目初始特征，导致它既不在 parameters 里
+        # （训练中从不更新），也不在 state_dict 里（从 checkpoint 恢复时会按当时的
+        # RNG 重新随机初始化，与训练时的模型不一致）。注册为 buffer 后数值不变，
+        # 但能随 state_dict 一起保存/恢复。
+        self.register_buffer(
+            'ques',
+            emb(torch.LongTensor([i for i in range(2 * C.NUM_OF_QUESTIONS)])).cuda())
         '''generate two graphs'''
         self.G = G
         self.adj_out = adj_out

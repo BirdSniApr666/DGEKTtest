@@ -1,0 +1,21 @@
+{
+  "source": "/workspace/Dataset/assist2017/assist2017_pid_train.csv",
+  "out_dir": "/workspace/Dataset/assist2017/split_seed216",
+  "split_unit": "block (one student per 4 lines)",
+  "seed": 216,
+  "valid_ratio": 0.1,
+  "total_blocks": 1367,
+  "train": {
+    "blocks": 1230,
+    "records": 694185,
+    "min_len": 2,
+    "max_len": 3057
+  },
+  "valid": {
+    "blocks": 137,
+    "records": 75208,
+    "min_len": 68,
+    "max_len": 1496
+  },
+  "total_records": 769393
+}

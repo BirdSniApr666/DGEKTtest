@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# 训练产物：可由 python -m KnowledgeTracing.evaluation.run 重新生成，不入库
+KnowledgeTracing/model/checkpoints/
+outputs/predictions_*.csv
+outputs/train20.log
+
+# 运行日志（保留仓库原有的 2022 年历史日志）
+KnowledgeTracing/evaluation/log/*.log
+!KnowledgeTracing/evaluation/log/2022_4_28_result.log
+
+# 编辑器 / AI 辅助
+.vscode/
+.codebuddy/
+
+# 系统文件
+.DS_Store
+Thumbs.db
