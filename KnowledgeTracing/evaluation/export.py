@@ -1,20 +1,5 @@
 # -*- coding: utf-8 -*-
-"""逐时间步预测导出。
-
-对齐原理
---------
-`lossFunc` 预测的是"第 t 步作答前的状态去答第 t+1 题"，因此对每个 chunk：
-
-    step        = 1 .. valid_len        （chunk 内 0-based 索引即 step）
-    question_id = chunk.questions[step]
-    concept_id  = chunk.concepts[step]
-    y_true      = chunk.answers[step]
-    prob_*      = aligned_predictions 返回的 pc / pt / penm[step-1]
-
-`valid_len` 由 ``aligned_predictions`` 的截断规则给出，与训练损失完全一致。
-导出前会做三项断言（chunk 数、样本覆盖、标签逐位相等），任何不一致立即报错，
-避免产出错位的预测文件。
-"""
+"""Export aligned next-question probabilities. Step 1 predicts the chunk's second answer."""
 from __future__ import annotations
 
 import os
@@ -31,7 +16,7 @@ from KnowledgeTracing.evaluation import pipeline
 
 COLUMNS = ['split', 'sample_idx', 'block_id', 'chunk_id', 'step',
            'question_id', 'concept_id', 'y_true',
-           'prob_cahg', 'prob_dtg', 'prob_ens', 'y_pred']
+           'prob_cahg', 'prob_dtg', 'prob_ens', 'prob_mean', 'y_pred']
 
 logger = pipeline.logger
 
@@ -46,6 +31,8 @@ def _load_model(device: torch.device, ckpt: str):
 def export_split(model, loader, loss_func, device, data_path: str,
                  out_path: str, split_name: str) -> Dict:
     """在单个 split 上导出逐时间步预测。"""
+    if not isinstance(loader.sampler, torch.utils.data.SequentialSampler):
+        raise ValueError('Prediction export requires a sequential loader to align CSV rows')
     auc, acc, details = kt_eval.test_epoch(model, loader, loss_func, device, collect=True)
 
     chunks = list(iter_chunks(data_path, C.MAX_STEP))
@@ -60,7 +47,7 @@ def export_split(model, loader, loss_func, device, data_path: str,
 
     blocks, chunk_ids, steps, sample_ids = [], [], [], []
     qids, cids, ys = [], [], []
-    pcs, pts, pes = [], [], []
+    pcs, pts, pes, mean_probs = [], [], [], []
     padded_chunks = 0
 
     for item in details:
@@ -68,31 +55,20 @@ def export_split(model, loader, loss_func, device, data_path: str,
         length = int(item['valid_len'])
         chunk = chunks[idx]
 
-        q = np.asarray(chunk['questions'][1:1 + length], dtype=np.int64)
-        c = np.asarray(chunk['concepts'][1:1 + length], dtype=np.int64)
-        y = np.asarray(chunk['answers'][1:1 + length], dtype=np.int64)
-        a = item['a'].numpy().astype(np.int64)
-
-        # 既有实现缺陷：当某 chunk 只有 1 个有效交互（seq_len % MAX_STEP == 1）时，
-        # 对齐后的 pc 全为 0，截断循环找不到 pc[i] > 0，valid_len 会停在 MAX_STEP-1，
-        # 于是 49 个 padding 步被当作"答错"样本计入损失与指标（论文原始代码同样如此）。
-        # 这里不修改评测数值（保持与论文可比），只在导出时剔除这些 padding 步。
-        mask = y >= 0
-        if length <= 0 or not np.array_equal(a[mask], y[mask]):
-            raise AssertionError(f'样本 {idx} 的真实标签与 chunk 不一致，预测对齐已失效')
-        if mask.any() and (q[mask] <= 0).any():
-            raise AssertionError(f'样本 {idx} 出现非法题号（{q[mask].min()}），chunk 解析有误')
-        if not mask.any():
+        step_idx = item['steps'].numpy()
+        answers = np.asarray(chunk['answers'], dtype=np.int64)
+        expected_steps = np.flatnonzero((answers[:-1] >= 0) & (answers[1:] >= 0)) + 1
+        if not np.array_equal(step_idx, expected_steps):
+            raise AssertionError(f'Sample {idx}: predicted steps disagree with source CSV')
+        if not length:
             padded_chunks += 1
             continue
-
-        q, c, y = q[mask], c[mask], y[mask]
-        step_idx = np.arange(1, length + 1)[mask]
-        pc_row = item['pc'].numpy()[mask]
-        pt_row = item['pt'].numpy()[mask]
-        pe_row = item['penm'].numpy()[mask]
-
-        n = int(mask.sum())
+        q = np.asarray(chunk['questions'], dtype=np.int64)[step_idx]
+        c = np.asarray(chunk['concepts'], dtype=np.int64)[step_idx]
+        y = answers[step_idx]
+        if not np.array_equal(item['a'].numpy(), y) or (q <= 0).any():
+            raise AssertionError(f'Sample {idx}: targets disagree with source CSV')
+        n = length
         blocks.extend([chunk['block_id']] * n)
         chunk_ids.extend([chunk['chunk_id']] * n)
         steps.extend(step_idx.tolist())
@@ -100,9 +76,10 @@ def export_split(model, loader, loss_func, device, data_path: str,
         qids.append(q)
         cids.append(c)
         ys.append(y)
-        pcs.append(pc_row)
-        pts.append(pt_row)
-        pes.append(pe_row)
+        pcs.append(item['pc'].numpy())
+        pts.append(item['pt'].numpy())
+        pes.append(item['penm'].numpy())
+        mean_probs.append(item['p_mean'].numpy())
 
     if not qids:
         raise AssertionError(f'{split_name} 没有可导出的有效时间步')
@@ -112,6 +89,7 @@ def export_split(model, loader, loss_func, device, data_path: str,
     prob_e = np.concatenate(pes)
     y_true = np.concatenate(ys)
 
+    prob_mean = np.concatenate(mean_probs)
     frame = pd.DataFrame({
         'split': split_name,
         'sample_idx': sample_ids,
@@ -124,7 +102,8 @@ def export_split(model, loader, loss_func, device, data_path: str,
         'prob_cahg': prob_c,
         'prob_dtg': prob_t,
         'prob_ens': prob_e,
-        'y_pred': (prob_e >= 0.5).astype(np.int64),
+        'prob_mean': prob_mean,
+        'y_pred': np.rint(prob_mean).astype(np.int64),
     }, columns=COLUMNS)
 
     os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)

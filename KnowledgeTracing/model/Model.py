@@ -5,6 +5,8 @@
 # @Project: GOODKT
 # @Comment :
 
+import math
+
 from KnowledgeTracing.hgnn_models import HGNN
 from KnowledgeTracing.Constant import Constants as C
 import torch.nn as nn
@@ -14,8 +16,11 @@ from KnowledgeTracing.DirectedGCN.GCN import GCN
 
 class DKT(nn.Module):
 
-    def __init__(self, hidden_dim, layer_dim, G, adj_in, adj_out):
+    def __init__(self, hidden_dim, layer_dim, G, adj_in, adj_out, personal_alpha=None):
         super(DKT, self).__init__()
+        if personal_alpha is not None and (not math.isfinite(personal_alpha) or personal_alpha <= 0):
+            raise ValueError('personal_alpha must be a finite positive number')
+        self.personal_alpha = personal_alpha
         '''initial feature'''
         emb_dim = C.EMB
         emb = nn.Embedding(2 * C.NUM_OF_QUESTIONS, emb_dim)
@@ -23,9 +28,7 @@ class DKT(nn.Module):
         # （训练中从不更新），也不在 state_dict 里（从 checkpoint 恢复时会按当时的
         # RNG 重新随机初始化，与训练时的模型不一致）。注册为 buffer 后数值不变，
         # 但能随 state_dict 一起保存/恢复。
-        self.register_buffer(
-            'ques',
-            emb(torch.LongTensor([i for i in range(2 * C.NUM_OF_QUESTIONS)])).cuda())
+        self.register_buffer('ques', emb.weight.detach())
         '''generate two graphs'''
         self.G = G
         self.adj_out = adj_out
@@ -53,13 +56,27 @@ class DKT(nn.Module):
     def forward(self, x):
         '''SkillGraph: HGCN'''
         ques_h = self.net(self.ques, self.G)
-        '''TransitionGraph: DGCN'''
-        ques_out = self.net1(self.ques, self.adj_out)
-        ques_in = self.net2(self.ques, self.adj_in)
-        ques_d = torch.cat([ques_in, ques_out], -1)
-        '''choose 50'''
-        x_h = x.matmul(ques_h)
-        x_d = x.matmul(ques_d)
+        # Historical checkpoints call DKT(G, outgoing, incoming), reversing the
+        # argument names. net2 uses successor rows and net1 uses predecessor rows.
+        alpha = getattr(self, 'personal_alpha', None)
+        if isinstance(x, dict):
+            nodes = x['nodes']
+            pad = nodes.unsqueeze(-1) < 0
+            indices = nodes.clamp_min(0)
+            x_h = ques_h[indices].masked_fill(pad, 0)
+            if alpha is None:
+                x_d = self._population_embeddings()[indices].masked_fill(pad, 0)
+            else:
+                outgoing = self.net2.forward_personal(
+                    self.ques, self.adj_in, nodes, x['out_rows'], x['out_neighbors'], x['out_counts'], alpha)
+                incoming = self.net1.forward_personal(
+                    self.ques, self.adj_out, nodes, x['in_rows'], x['in_neighbors'], x['in_counts'], alpha)
+                x_d = torch.cat((outgoing, incoming), dim=-1)
+        else:
+            if alpha is not None:
+                raise ValueError('personal transitions require prefix counts and indexed interaction nodes')
+            x_h = x.matmul(ques_h)
+            x_d = x.matmul(self._population_embeddings())
 
         '''gru'''
         out_h, _ = self.rnn1(x_h)
@@ -76,3 +93,8 @@ class DKT(nn.Module):
         emseble_logit = self.fc_ensemble(torch.cat([out_d, out_h], -1))
 
         return logit_c, logit_t, emseble_logit
+
+    def _population_embeddings(self):
+        outgoing = self.net2(self.ques, self.adj_in)
+        incoming = self.net1(self.ques, self.adj_out)
+        return torch.cat((outgoing, incoming), dim=-1)

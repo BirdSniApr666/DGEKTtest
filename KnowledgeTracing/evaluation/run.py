@@ -24,6 +24,7 @@
 from __future__ import annotations
 
 import argparse
+import math
 import os
 import sys
 
@@ -35,12 +36,18 @@ import torch  # noqa: E402
 
 from KnowledgeTracing.Constant import Constants as C  # noqa: E402
 from KnowledgeTracing.data import split as split_mod  # noqa: E402
-from KnowledgeTracing.data.dataloader import getLoader  # noqa: E402
+from KnowledgeTracing.data.dataloader import getTrainLoader, getValidLoader, getTestLoader  # noqa: E402
 from KnowledgeTracing.evaluation import pipeline  # noqa: E402
 
 
 def parse_args(argv=None):
-    parser = argparse.ArgumentParser(description='DGEKT on ASSIST17: split / train / test / export')
+    parser = argparse.ArgumentParser(description='DGEKT on ASSIST09 / ASSIST17: split / train / test / export')
+    parser.add_argument('--dataset', choices=('assist2009', 'assist2017'), help='默认 assist2017')
+    parser.add_argument('--transition', choices=('static', 'personal'),
+                        help='static 为共享转移图，personal 为固定先验强度的个人前缀图')
+    parser.add_argument('--alpha', type=float, help='个人图群体先验的伪计数，默认 5')
+    parser.add_argument('--h-file', help='题目—知识点关联矩阵 CSV 的路径')
+    parser.add_argument('--device', choices=('cpu', 'cuda'), help='默认优先使用 CUDA')
     parser.add_argument('--stage', default='all',
                         choices=['split', 'train', 'test', 'export', 'all'],
                         help='执行阶段；all = train -> test -> export')
@@ -57,7 +64,12 @@ def parse_args(argv=None):
     parser.add_argument('--split-ratio', type=float, default=0.1, help='验证集比例')
     parser.add_argument('--no-valid', action='store_true',
                         help='不使用验证集（退化为原论文代码行为：用 test 监控，仅用于快速对齐）')
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    if args.alpha is not None and (args.transition != 'personal' or not math.isfinite(args.alpha) or args.alpha <= 0):
+        parser.error('--alpha requires --transition personal and a finite positive value')
+    if args.transition == 'personal' and args.no_valid:
+        parser.error('--transition personal requires an independent validation set')
+    return args
 
 
 def resolve_resume(value):
@@ -75,6 +87,10 @@ def resolve_resume(value):
 def main(argv=None):
     args = parse_args(argv)
 
+    if args.dataset is not None or args.transition is not None:
+        C.configure_experiment(args.dataset or 'assist2017', args.transition or 'static',
+                               5.0 if args.alpha is None else args.alpha,
+                               216 if args.seed is None else args.seed)
     C.apply_overrides(
         EPOCH=args.epochs,
         LR=args.lr,
@@ -83,14 +99,8 @@ def main(argv=None):
         TRAIN_PATH=args.train_file,
         VALID_PATH=args.valid_file,
         TEST_PATH=args.test_file,
+        H_PATH=args.h_file,
     )
-
-    pipeline.setup_logger()
-    logger = pipeline.logger
-    logger.info('argv=%s', sys.argv if argv is None else argv)
-
-    os.makedirs(C.OUT_DIR, exist_ok=True)
-    os.makedirs(C.CKPT_DIR, exist_ok=True)
 
     if args.stage == 'split':
         meta = split_mod.split_blocks(C.FULL_TRAIN_PATH, str(C.SPLIT_DIR),
@@ -99,18 +109,27 @@ def main(argv=None):
               f'-> {C.SPLIT_DIR}')
         return
 
-    torch.cuda.set_device(0)
-    device = torch.device('cuda')
+    needs_valid = not args.no_valid and args.stage in ('train', 'export', 'all')
+    if needs_valid and not os.path.isfile(C.VALID_PATH):
+        raise FileNotFoundError(f'Missing validation split {C.VALID_PATH}. Run --stage split for {C.DATASET} first.')
+    pipeline.setup_logger()
+    logger = pipeline.logger
+    logger.info('argv=%s', sys.argv if argv is None else argv)
+    device = torch.device(args.device or ('cuda' if torch.cuda.is_available() else 'cpu'))
+    if device.type == 'cuda':
+        torch.cuda.set_device(0)
     pipeline.set_seed(C.SEED)
 
     logger.info('Dataset=%s | Q=%d | MAX_STEP=%d | BATCH=%d | LR=%g | EPOCH=%d',
                 C.DATASET, C.NUM_OF_QUESTIONS, C.MAX_STEP, C.BATCH_SIZE, C.LR, C.EPOCH)
-    print(f'GPU: {torch.cuda.get_device_name(0)}')
-    print(f'Dataset: {C.DATASET} | Questions: {C.NUM_OF_QUESTIONS} | EPOCH: {C.EPOCH}')
+    print(f'Device: {torch.cuda.get_device_name(0) if device.type == "cuda" else device}')
+    print(f'Dataset: {C.DATASET} | Transition: {C.TRANSITION} | Questions: {C.NUM_OF_QUESTIONS} | EPOCH: {C.EPOCH}')
 
-    train_loader, valid_loader, test_loader = getLoader(
-        C.DATASET, train_path=C.TRAIN_PATH, valid_path=C.VALID_PATH,
-        test_path=C.TEST_PATH, use_valid=not args.no_valid)
+    loader_options = {'indexed': True, 'personal': C.TRANSITION == 'personal'}
+    train_loader = getTrainLoader(C.TRAIN_PATH, **loader_options) if args.stage in ('train', 'all') else None
+    valid_loader = getValidLoader(C.VALID_PATH, **loader_options) if needs_valid else None
+    needs_test = args.stage in ('test', 'export', 'all') or (args.stage == 'train' and args.no_valid)
+    test_loader = getTestLoader(C.TEST_PATH, **loader_options) if needs_test else None
 
     if args.stage in ('train', 'all'):
         if valid_loader is None:

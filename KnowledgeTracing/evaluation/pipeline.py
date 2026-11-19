@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
 import logging
 import os
@@ -21,6 +22,7 @@ from typing import Dict, List, Optional
 import numpy as np
 import pandas as pd
 import torch
+from scipy import sparse
 from torch import optim as optima
 
 from KnowledgeTracing.Constant import Constants as C
@@ -74,12 +76,31 @@ def build_model(device: torch.device):
     而原论文代码的调用是 ``DKT(HIDDEN, LAYERS, G, adj_out, adj_in)``，二者相反。
     这是既有真实行为，**必须原样保留**，否则模型数值会改变。
     """
-    adj = hgut.generate_G_from_H(pd.read_csv(C.H_PATH, header=None))
-    G = adj.cuda()
+    incidence = pd.read_csv(C.H_PATH, header=None, dtype=np.float32).to_numpy()
+    q, k = C.NUM_OF_QUESTIONS, C.NUM_OF_CONCEPTS
+    if incidence.shape == (q, k):
+        incidence = sparse.csr_matrix(incidence)
+        incidence = sparse.block_diag([incidence, incidence], format='csr')
+    elif incidence.shape != (2*q, 2*k):
+        raise ValueError(f'{C.H_PATH}: expected {(q, k)} or {(2*q, 2*k)}, got {incidence.shape}')
+    G = hgut.generate_factorized_G_from_H(incidence).to(device)
     adj_out, adj_in = get_adj(C.TRAIN_PATH)
-    adj_in = adj_in.cuda()
-    adj_out = adj_out.cuda()
-    return DKT(C.HIDDEN, C.LAYERS, G, adj_out, adj_in).to(device)
+    alpha = C.PERSONAL_ALPHA if C.TRANSITION == 'personal' else None
+    model = DKT(C.HIDDEN, C.LAYERS, G, adj_out.to(device), adj_in.to(device),
+                personal_alpha=alpha).to(device)
+    # The population prior and CAHG are rebuilt from these files on each run.
+    model.graph_config = {'dataset': C.DATASET, 'transition': C.TRANSITION, 'alpha': alpha,
+                          'train_sha256': file_sha256(C.TRAIN_PATH), 'h_sha256': file_sha256(C.H_PATH)}
+    return model
+
+
+def file_sha256(path):
+    digest = hashlib.sha256()
+    # Text mode makes a run portable between CRLF and LF checkouts.
+    with open(path, encoding='utf-8-sig') as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), ''):
+            digest.update(chunk.encode('utf-8'))
+    return digest.hexdigest()
 
 
 def build_optimizer(model):
@@ -93,6 +114,7 @@ def save_checkpoint(path: str, model, optimizer, epoch: int, best_auc: float) ->
     os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
     torch.save({
         'model': model.state_dict(),
+        'graph_config': model.graph_config,
         # 兼容早期版本的 state_dict（当时 ques 尚未注册为 buffer），
         # 显式冗余保存一份，确保任何情况下都能恢复题目初始特征
         QUES_KEY: model.ques.detach().cpu(),
@@ -113,6 +135,11 @@ def load_checkpoint(path: str, model, optimizer=None):
     # 用 cpu 作为 map_location：避免把 RNG state 等非参数张量也搬到 GPU，
     # load_state_dict 会自动对齐到模型所在设备。
     state = torch.load(path, map_location='cpu', weights_only=False)
+    saved_config = state.get('graph_config') if isinstance(state, dict) else None
+    if saved_config is None and model.personal_alpha is not None:
+        raise ValueError('Legacy checkpoints use the static graph; choose --transition static.')
+    if saved_config is not None and saved_config != model.graph_config:
+        raise ValueError(f'Checkpoint graph configuration mismatch: {saved_config} vs {model.graph_config}')
     if isinstance(state, dict) and 'model' in state and isinstance(state['model'], dict):
         model_dict = state['model']
         missing, unexpected = model.load_state_dict(model_dict, strict=False)
@@ -120,10 +147,12 @@ def load_checkpoint(path: str, model, optimizer=None):
         # 从顶层冗余字段恢复
         if QUES_KEY not in model_dict:
             if QUES_KEY in state:
-                model.ques = state[QUES_KEY].to(model.ques.device)
+                model.ques = state[QUES_KEY].detach().to(model.ques.device)
             else:
                 logger.warning('checkpoint 缺少题目初始特征 ques，将使用当前随机初始化；'
                                '请在 set_seed(C.SEED) 后重建模型以保证与训练时一致')
+        if saved_config is not None and (missing or unexpected):
+            raise ValueError(f'Checkpoint weights mismatch: missing={missing}, unexpected={unexpected}')
         if missing or unexpected:
             logger.warning('state_dict 非严格匹配: missing=%s unexpected=%s', missing, unexpected)
         if optimizer is not None and 'optimizer' in state:
@@ -145,7 +174,7 @@ def load_checkpoint(path: str, model, optimizer=None):
     if hasattr(state, 'state_dict'):
         model.load_state_dict(state.state_dict(), strict=False)
         if hasattr(state, 'ques'):
-            model.ques = state.ques.to(model.ques.device)
+            model.ques = state.ques.detach().to(model.ques.device)
         return model, 0, 0.0
     raise ValueError(f'无法识别的 checkpoint 格式: {path}')
 
@@ -277,6 +306,7 @@ def test_once(test_loader, device, ckpt: Optional[str] = None,
         'test_acc': acc,
         'config': {
             'dataset': C.DATASET,
+            'graph': model.graph_config,
             'num_questions': C.NUM_OF_QUESTIONS,
             'max_step': C.MAX_STEP,
             'batch_size': C.BATCH_SIZE,

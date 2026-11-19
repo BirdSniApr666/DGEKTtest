@@ -31,7 +31,47 @@ To run this code you need the following:
 ```
 pip3 install torch==1.7.0 numpy==1.21.2 pandas==1.4.1 scipy==1.7.3 scikit-learn==1.0.2 tqdm==4.26.3 
 ```
+## Student-specific transition graph
+
+The indexed pipeline was checked with PyTorch 2.5.1 (CUDA 12.1).
+Use `--transition personal --alpha 5` for the prefix-based DTG. Each node is an
+(exercise, observed answer) pair. After each response, the student's directed edge
+counts are updated before predicting the following response. Counts carry across
+chunks for the same student. The first DTG layer uses the normalized training
+graph. In the second layer, incoming and outgoing rows are independently mixed
+as `(alpha * population_row + prefix_counts) / (alpha + sum(prefix_counts))`.
+An empty personal row falls back to its population row. Both graph modes use the
+same CAHG, GRUs, heads and loss.
+
+From the project root, with the authors' ASSIST09 train/test files in
+`Dataset/assist2009/` and incidence matrix at `Dataset/H/2009.csv`, run:
+
+```bash
+python -m KnowledgeTracing.evaluation.run --dataset assist2009 --stage split
+python -m KnowledgeTracing.evaluation.run --dataset assist2009 --transition static --stage train --epochs 20 --seed 216
+python -m KnowledgeTracing.evaluation.run --dataset assist2009 --transition personal --alpha 5 --stage train --epochs 20 --seed 216
+```
+
+Use the same split and training seed for both modes. Choose any other fixed
+alpha using validation AUC only. After selecting a configuration, run the test
+and export stages with the same flags:
+
+```bash
+python -m KnowledgeTracing.evaluation.run --dataset assist2009 --transition personal --alpha 5 --stage test --seed 216
+python -m KnowledgeTracing.evaluation.run --dataset assist2009 --transition personal --alpha 5 --stage export --seed 216
+```
+
+Use `--dataset assist2017` for the included data and split. On a 4 GB GPU start
+with `--batch-size 16` for both configurations. On a 24 GB GPU the default batch
+size is 128. Named runs keep separate outputs and checkpoints by dataset, graph,
+alpha and seed, e.g. `outputs/assist2009/personal_alpha5.0/seed216/`.
+Use `history.csv` for validation AUC and `metrics.json` for test AUC/ACC. The
+prediction CSV's `prob_mean` is the probability used for both reported metrics.
+Re-evaluate the static control with this version: it excludes padding in
+one-interaction tail chunks that older metrics counted as incorrect answers.
+
 ## Hyperparameter Settings
+
 `/KnowledgeTracing/Constant/Constants.py` is specially used to set super parameters, all parameters of the whole model can be set in this file.
 
 > MAX_STEP = 50 

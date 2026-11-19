@@ -7,6 +7,7 @@ __pycache__/
 # 训练产物：可由 python -m KnowledgeTracing.evaluation.run 重新生成，不入库
 KnowledgeTracing/model/checkpoints/
 outputs/predictions_*.csv
+outputs/**/predictions_*.csv
 outputs/train20.log
 
 # 运行日志（保留仓库原有的 2022 年历史日志）

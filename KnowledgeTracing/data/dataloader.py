@@ -21,9 +21,15 @@ import torch.utils.data as Data
 from KnowledgeTracing.Constant import Constants as C
 from KnowledgeTracing.data.preprocess import DataReader
 from KnowledgeTracing.data.OneHot import OneHot
+from KnowledgeTracing.data.personal import PersonalDataset, collate_personal
 
 
-def _build_loader(path, max_step, batch_size, shuffle, drop_last, desc):
+def _build_loader(path, max_step, batch_size, shuffle, drop_last, desc,
+                  personal=False, indexed=False):
+    if personal or indexed:
+        dataset = PersonalDataset(path, max_step, C.NUM_OF_QUESTIONS, personal=personal)
+        return Data.DataLoader(dataset, batch_size=batch_size, shuffle=shuffle,
+                               drop_last=drop_last, collate_fn=collate_personal)
     handle = DataReader(path, max_step)
     loader = getattr(handle, desc)()
     dataset = OneHot(*loader)
@@ -31,29 +37,30 @@ def _build_loader(path, max_step, batch_size, shuffle, drop_last, desc):
                            drop_last=drop_last)
 
 
-def getTrainLoader(train_data_path=None):
+def getTrainLoader(train_data_path=None, *, personal=False, indexed=False):
     return _build_loader(train_data_path or C.TRAIN_PATH, C.MAX_STEP,
                          C.BATCH_SIZE, shuffle=True, drop_last=True,
-                         desc='getTrainData')
+                         desc='getTrainData', personal=personal, indexed=indexed)
 
 
-def getValidLoader(valid_data_path=None):
+def getValidLoader(valid_data_path=None, *, personal=False, indexed=False):
     """独立验证集：不参与训练，也不参与转移图构建。"""
     path = valid_data_path or C.VALID_PATH
     if not os.path.exists(path):
         return None
     return _build_loader(path, C.MAX_STEP, C.BATCH_SIZE,
-                         shuffle=False, drop_last=False, desc='getTestData')
+                         shuffle=False, drop_last=False, desc='getTestData',
+                         personal=personal, indexed=indexed)
 
 
-def getTestLoader(test_data_path=None):
+def getTestLoader(test_data_path=None, *, personal=False, indexed=False):
     return _build_loader(test_data_path or C.TEST_PATH, C.MAX_STEP,
                          C.BATCH_SIZE, shuffle=False, drop_last=False,
-                         desc='getTestData')
+                         desc='getTestData', personal=personal, indexed=indexed)
 
 
 def getLoader(dataset, train_path=None, valid_path=None, test_path=None,
-              use_valid=True):
+              use_valid=True, *, personal=False, indexed=False):
     """返回 ``(trainLoader, validLoader, testLoader)``；``use_valid=False`` 时 valid 为 None。"""
     if dataset not in C.datasets:
         raise ValueError(f'未知数据集: {dataset}')
@@ -68,6 +75,6 @@ def getLoader(dataset, train_path=None, valid_path=None, test_path=None,
         valid_path = valid_path or os.path.join(base, f'{dataset}_pid_valid.csv')
         test_path = test_path or os.path.join(base, f'{dataset}_pid_test.csv')
 
-    return (getTrainLoader(train_path),
-            getValidLoader(valid_path) if use_valid else None,
-            getTestLoader(test_path))
+    return (getTrainLoader(train_path, personal=personal, indexed=indexed),
+            getValidLoader(valid_path, personal=personal, indexed=indexed) if use_valid else None,
+            getTestLoader(test_path, personal=personal, indexed=indexed))

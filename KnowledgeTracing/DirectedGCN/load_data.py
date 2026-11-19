@@ -21,30 +21,31 @@ def get_adj(train_path=None):
             的交互会泄漏进图结构中。
     """
     q = C.NUM_OF_QUESTIONS
-    resout = np.zeros((2 * q, 2 * q))
+    # Identity entries provide the original one self-loop per node and also
+    # make rows for unobserved interactions well defined.
+    sources = [np.arange(2 * q)]
+    targets = [sources[0]]
     path = train_path or C.TRAIN_PATH
 
     with open(path, 'r', encoding='UTF-8-sig') as train:
-        for len, ques, _, ans in tqdm.tqdm(itertools.zip_longest(*[train] * 4), desc='Generate adjacency matrix:    ',
-                                           mininterval=2):
-            len = int(len.strip().strip(','))
-            ques = np.array(ques.strip().strip(',').split(',')).astype(int)
-            ans = np.array(ans.strip().strip(',').split(',')).astype(int)
-            if len > 1:
-                for i in range(len):
-                    if ans[i] == 0:
-                        ques[i] += q
-
-                for j in range(len - 1):
-                    resout[ques[j] - 1][ques[j + 1] - 1] += 1
-    resin = resout.T
-    resout = normalize(resout + sp.eye(resout.shape[0]))
-    resin = normalize(resin + sp.eye(resin.shape[0]))
-
-    resout = sparse_mx_to_torch_sparse_tensor(sp.coo_matrix(resout))
-    resin = sparse_mx_to_torch_sparse_tensor(sp.coo_matrix(resin))
-
-    return resout, resin
+        for length, ques, _, ans in tqdm.tqdm(itertools.zip_longest(*[train] * 4), desc='Generate adjacency matrix',
+                                              mininterval=2):
+            if ans is None:
+                raise ValueError('Incomplete four-line student record in ' + str(path))
+            length = int(length.strip().strip(','))
+            questions = np.array(ques.strip().strip(',').split(','), dtype=np.int64)
+            answers = np.array(ans.strip().strip(',').split(','), dtype=np.int64)
+            if (len(questions) != length or len(answers) != length or
+                    (questions < 1).any() or (questions > q).any() or
+                    ((answers != 0) & (answers != 1)).any()):
+                raise ValueError('Invalid question, answer, or sequence length in ' + str(path))
+            nodes = questions - 1 + (answers == 0) * q
+            sources.append(nodes[:-1])
+            targets.append(nodes[1:])
+    rows, cols = np.concatenate(sources), np.concatenate(targets)
+    transitions = sp.coo_matrix((np.ones(len(rows)), (rows, cols)), shape=(2 * q, 2 * q)).tocsr()
+    return (sparse_mx_to_torch_sparse_tensor(normalize(transitions)),
+            sparse_mx_to_torch_sparse_tensor(normalize(transitions.T)))
 
 
 def normalize(mx):
@@ -64,4 +65,4 @@ def sparse_mx_to_torch_sparse_tensor(sparse_mx):
     indices = torch.from_numpy(np.vstack((sparse_mx.row, sparse_mx.col)).astype(np.int64))
     values = torch.from_numpy(sparse_mx.data)
     shape = torch.Size(sparse_mx.shape)
-    return torch.sparse.FloatTensor(indices, values, shape)
+    return torch.sparse_coo_tensor(indices, values, shape).coalesce()

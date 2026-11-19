@@ -13,6 +13,7 @@
 4. 删除原 ``set_seed`` 中把 ``CUDA_VISIBLE_DEVICES`` 设成 ``'0,2'`` 的无效逻辑。
 """
 import sys
+import math
 from pathlib import Path
 
 # /workspace  —— KnowledgeTracing/Constant/Constants.py 向上两级
@@ -54,6 +55,8 @@ EMB = 256
 HIDDEN = 128  # sequence model's
 kd_loss = 5.00E-06
 LAYERS = 1
+TRANSITION = 'static'
+PERSONAL_ALPHA = 5.0
 
 # ---------------------------------------------------------------------------
 # 路径（绝对路径，任意 cwd 均可运行）
@@ -100,3 +103,27 @@ def apply_overrides(**kwargs):
         setattr(module, key, value)
         applied[key] = value
     return applied
+
+
+def configure_experiment(dataset, transition, alpha, seed):
+    """Set all dataset paths together and isolate named experiment artifacts."""
+    if not math.isfinite(alpha) or alpha <= 0:
+        raise ValueError('alpha must be finite and strictly positive')
+    if transition not in ('static', 'personal'):
+        raise ValueError(f'Unknown transition mode: {transition}')
+    year = {'assist2009': '2009', 'assist2017': '2017'}[dataset]
+    data_dir = ROOT_DIR / 'Dataset' / dataset
+    split_dir = data_dir / f'split_seed{SPLIT_SEED}'
+    variant = 'static' if transition == 'static' else f'personal_alpha{alpha}'
+    run_dir = Path(dataset) / variant / f'seed{seed}'
+    apply_overrides(
+        DATASET=dataset, DATASET_DIR=data_dir, SPLIT_DIR=split_dir,
+        NUM_OF_QUESTIONS=numbers[dataset], NUM_OF_CONCEPTS=skill[dataset], H=year,
+        H_PATH=str(ROOT_DIR / 'Dataset' / 'H' / f'{year}.csv'),
+        FULL_TRAIN_PATH=str(data_dir / f'{dataset}_pid_train.csv'),
+        TRAIN_PATH=str(split_dir / 'train.csv'), VALID_PATH=str(split_dir / 'valid.csv'),
+        TEST_PATH=str(data_dir / f'{dataset}_pid_test.csv'),
+        TRANSITION=transition, PERSONAL_ALPHA=alpha, SEED=seed,
+        OUT_DIR=str(ROOT_DIR / 'outputs' / run_dir),
+        CKPT_DIR=str(ROOT_DIR / 'KnowledgeTracing' / 'model' / 'checkpoints' / run_dir),
+    )

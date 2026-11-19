@@ -1,181 +1,152 @@
-# -*- coding: utf-8 -*-
-# @Time : 2022/4/28 19:18
-# @Author : Yumo
-# @File : eval.py
-# @Project: GOODKT
-# @Comment :
-"""损失与评估。
-
-与原版差异：
-1. 把「每步预测 ↔ 下一步作答」的对齐与 pad 截断逻辑抽成 ``aligned_predictions``，
-   训练 / 验证 / 测试 / 预测导出共用同一份实现，避免 DRY 被破坏；
-2. ``lossFunc.forward`` 的损失数值与聚合顺序保持不变；
-3. ``test_epoch`` 新增 ``collect=True``：额外返回逐样本明细（三路概率 + 真值 + 有效步数），
-   供 ``export.py`` 落盘。
-"""
-import tqdm
-import torch
-from KnowledgeTracing.Constant import Constants as C
-import torch.nn as nn
-from sklearn import metrics
+"""DGEKT losses and evaluation shared by the population and personal graph models."""
 import logging
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import tqdm
+from sklearn import metrics
+
+from KnowledgeTracing.Constant import Constants as C
+
 
 logger = logging.getLogger('main.eval')
 
 
 def performance(ground_truth, prediction):
-    fpr, tpr, thresholds = metrics.roc_curve(ground_truth.detach().cpu().numpy(),
-                                             prediction.detach().cpu().numpy())
-    auc = metrics.auc(fpr, tpr)
-    acc = metrics.accuracy_score(ground_truth.detach().cpu().numpy(), torch.round(prediction).detach().cpu().numpy())
-    logger.info('\nauc: ' + str(auc) + 'acc: ' + str(acc))
-    print('auc: ' + str(auc) + ' acc: ' + str(acc))
+    y = ground_truth.detach().cpu().numpy()
+    p = prediction.detach().cpu()
+    if not len(y):
+        raise ValueError('No valid next-question targets in evaluation data')
+    auc = float(metrics.roc_auc_score(y, p.numpy())) if y.min() != y.max() else float('nan')
+    acc = float(metrics.accuracy_score(y, p.round().numpy()))
+    logger.info('auc: %s acc: %s', auc, acc)
+    print(f'auc: {auc} acc: {acc}')
     return auc, acc
 
 
+def _nodes(batch):
+    if isinstance(batch, dict):
+        return batch['nodes']
+    # Historical loaders yield a one-hot vector of interaction IDs at each step.
+    magnitude, nodes = batch.max(dim=-1)
+    return nodes.masked_fill(magnitude == 0, -1)
+
+
+def _next_targets(nodes, question_count):
+    target = nodes[:, 1:]
+    valid = (nodes[:, :-1] >= 0) & (target >= 0)
+    questions = target.clamp_min(0).remainder(question_count).unsqueeze(-1)
+    answers = (target < question_count) & valid
+    return questions, answers, valid
+
+
+def _select_next(values, questions):
+    # Output at t represents history through t. Query only column q[t+1].
+    return values[:, :-1].gather(-1, questions).squeeze(-1)
+
+
 def aligned_predictions(p_c, p_t, p_enm, batch, student, q, max_step, index):
-    """取单个学生在「预测下一步」上的三路概率与真值，并裁掉 padding。
-
-    原实现（`lossFunc.forward` 内联）逐字搬迁，仅把循环内重复构造的 ``index``
-    提为入参。
-
-    Returns:
-        (pc, pt, penm, a, valid_len)
-        pc/pt/penm 为长度 valid_len 的一维张量（CAHG / DTG / ensemble 三路预测），
-        a 为对应的真实作答标签，valid_len 为真实可评测步数。
-    """
-    delta = batch[student][:, :q] + batch[student][:, q:]
-
-    a = (((batch[student][:, 0:q] -
-           batch[student][:, q:]).sum(1) + 1) //
-         2)[1:]  # [max_step-1]
-    temp_c = p_c[student][:max_step - 1].mm(delta[1:].t())
-    temp_t = p_t[student][:max_step - 1].mm(delta[1:].t())
-    temp_enm = p_enm[student][:max_step - 1].mm(delta[1:].t())
-    pc = temp_c.gather(0, index)[0]
-    pt = temp_t.gather(0, index)[0]
-    penm = temp_enm.gather(0, index)[0]
-
-    valid_len = len(pc)
-    for i in range(len(pc) - 1, -1, -1):
-        if pc[i] > 0:
-            valid_len = i + 1
-            break
-    if valid_len < len(pc):
-        pc = pc[:valid_len]
-        pt = pt[:valid_len]
-        penm = penm[:valid_len]
-        a = a[:valid_len]
-
-    return pc, pt, penm, a, valid_len
+    """Historical single-chunk API for callers that already have probabilities."""
+    nodes = _nodes(batch)[student:student + 1, :max_step]
+    questions, answers, valid = _next_targets(nodes, q)
+    probabilities = [_select_next(p[student:student + 1, :max_step], questions)[valid]
+                     for p in (p_c, p_t, p_enm)]
+    labels = answers[valid].to(p_c.dtype)
+    return (*probabilities, labels, labels.numel())
 
 
 class lossFunc(nn.Module):
     def __init__(self, hidden, max_step, device):
-        super(lossFunc, self).__init__()
-        self.crossEntropy = nn.BCELoss()
+        super().__init__()
         self.q = C.NUM_OF_QUESTIONS
-        self.hidden = hidden
-        self.sig = nn.Sigmoid()
-        self.max_step = max_step
         self.device = device
-        self.mse = nn.MSELoss()
-        # 仅在评估阶段打开，避免训练时产生额外显存/时间开销
         self.collect = False
         self.last_details = None
 
     def forward(self, logit_c, logit_t, logit_ensemble, batch):
-        p_c = self.sig(logit_c)
-        p_t = self.sig(logit_t)
-        p_enm = self.sig(logit_ensemble)
-        '''kd_loss'''
-        T = 0.5
-        p0_c = self.sig(logit_c/T)
-        p0_t = self.sig(logit_t/T)
-        p0_enm = self.sig(logit_ensemble/T)
-        loss_kd = C.kd_loss * (torch.sum(torch.abs(p0_enm-p0_c)) + torch.sum(torch.abs(p0_enm-p0_t)))
-        loss = torch.Tensor([0.0]).cuda()
-        prediction = torch.tensor([], device=self.device)
-        ground_truth = torch.tensor([], device=self.device)
-        details = [] if self.collect else None
+        logits = (logit_c, logit_t, logit_ensemble)
+        questions, answers, valid = _next_targets(_nodes(batch), self.q)
+        answers = answers.to(logit_c.dtype)
+        pc, pt, pe = [torch.sigmoid(_select_next(value, questions)) for value in logits]
 
-        index = torch.tensor([[i for i in range(self.max_step - 1)]],
-                             dtype=torch.long, device=self.device)
-        for student in range(batch.shape[0]):
-            pc, pt, penm, a, valid_len = aligned_predictions(
-                p_c, p_t, p_enm, batch, student, self.q, self.max_step, index)
+        # Preserve the baseline's sum of per-student mean BCE across three heads.
+        # A singleton tail chunk has no supervised targets and contributes zero CE.
+        n_valid = valid.sum(dim=1).clamp_min(1)
+        loss = sum(((F.binary_cross_entropy(p, answers, reduction='none') * valid).sum(dim=1)
+                    / n_valid).sum() for p in (pt, pc, pe))
 
-            loss = loss + self.crossEntropy(pt, a) + self.crossEntropy(pc, a)+ self.crossEntropy(penm, a)
-            p_mean = (pt + pc + penm)/3.0
-            prediction = torch.cat([prediction, p_mean])
-            ground_truth = torch.cat([ground_truth, a])
-
-            if self.collect:
-                details.append({
-                    'pc': pc.detach().cpu(),
-                    'pt': pt.detach().cpu(),
-                    'penm': penm.detach().cpu(),
-                    'a': a.detach().cpu(),
-                    'valid_len': valid_len,
+        # Preserve baseline KD over all questions and timesteps (including padding).
+        teacher = torch.sigmoid(logit_ensemble / 0.5)
+        loss_kd = C.kd_loss * sum((teacher - torch.sigmoid(peer / 0.5)).abs().sum()
+                                  for peer in (logit_c, logit_t))
+        probability = (pt + pc + pe) / 3.0
+        self.last_details = None
+        if self.collect:
+            # Transfer once per tensor instead of synchronizing at every student.
+            pc_cpu, pt_cpu, pe_cpu, p_cpu, y_cpu, mask_cpu = [
+                x.detach().cpu() for x in (pc, pt, pe, probability, answers, valid)
+            ]
+            self.last_details = []
+            for i, mask in enumerate(mask_cpu):
+                y = y_cpu[i, mask]
+                self.last_details.append({
+                    'pc': pc_cpu[i, mask], 'pt': pt_cpu[i, mask], 'penm': pe_cpu[i, mask],
+                    'a': y, 'p_mean': p_cpu[i, mask], 'valid_len': y.numel(),
+                    'steps': mask.nonzero(as_tuple=True)[0] + 1,
                 })
 
-        self.last_details = details
-        return loss, loss_kd, prediction, ground_truth
+        return loss, loss_kd, probability[valid], answers[valid]
+
+
+def _to_device(batch, device):
+    if isinstance(batch, dict):
+        return {key: value.to(device, non_blocking=True) for key, value in batch.items()}
+    return batch.to(device, non_blocking=True)
 
 
 def train_epoch(model, trainLoader, optimizer, loss_func):
     model.train()
     total = 0.0
     for batch in tqdm.tqdm(trainLoader, desc='Training:    ', mininterval=2):
-        logit_c, logit_t, logit_ensemble = model(batch)
-        loss, loss_kd, _, _ = loss_func(logit_c, logit_t, logit_ensemble, batch)
-        total_loss = loss + loss_kd
+        batch = _to_device(batch, loss_func.device)
         optimizer.zero_grad()
-        total_loss.backward(retain_graph=True)
+        loss, loss_kd, _, _ = loss_func(*model(batch), batch)
+        total_loss = loss + loss_kd
+        total_loss.backward()
         optimizer.step()
         total += total_loss.item()
-
     return model, optimizer, total / max(len(trainLoader), 1)
 
 
+@torch.no_grad()
 def test_epoch(model, testLoader, loss_func, device, collect=False):
-    """在给定 loader 上评估。
-
-    Args:
-        collect: 为 True 时额外返回逐样本明细列表（含全局样本索引）。
-    """
+    """Evaluate a split. Collected sample indices assume the sequential evaluation loader."""
     model.eval()
     loss_func.collect = collect
+    predictions, labels = [], []
+    total_loss = total_kd = 0.0
+    details = []
+    try:
+        for batch in tqdm.tqdm(testLoader, desc='Testing:     ', mininterval=2):
+            batch = _to_device(batch, device)
+            loss, loss_kd, p, a = loss_func(*model(batch), batch)
+            total_loss += loss.item()
+            total_kd += loss_kd.item()
+            predictions.append(p.cpu())
+            labels.append(a.cpu())
+            if collect:
+                for item in loss_func.last_details:
+                    item['sample_idx'] = len(details)
+                    details.append(item)
+    finally:
+        loss_func.collect = False
+        loss_func.last_details = None
 
-    ground_truth = torch.tensor([], device=device)
-    prediction = torch.tensor([], device=device)
-    total_loss = 0.0
-    total_kd = 0.0
-    details = [] if collect else None
-    cursor = 0
-
-    for batch in tqdm.tqdm(testLoader, desc='Testing:     ', mininterval=2):
-        with torch.no_grad():
-            logit_c, logit_t, logit_ensemble = model(batch)
-            loss, loss_kd, p, a = loss_func(logit_c, logit_t, logit_ensemble, batch)
-        total_loss += loss.item()
-        total_kd += loss_kd.item()
-        prediction = torch.cat([prediction, p])
-        ground_truth = torch.cat([ground_truth, a])
-
-        if collect:
-            for local, item in enumerate(loss_func.last_details):
-                item['sample_idx'] = cursor + local
-                details.append(item)
-        cursor += batch.shape[0]
-
-    loss_func.collect = False
-
-    n_batch = max(len(testLoader), 1)
+    if not predictions:
+        raise ValueError('Evaluation loader has no chunks')
+    n_batch = len(predictions)
     print('loss:', total_loss / n_batch, '   kd_loss:', total_kd / n_batch)
     print('Total loss:', (total_loss + total_kd) / n_batch)
-    auc, acc = performance(ground_truth, prediction)
-
-    if collect:
-        return auc, acc, details
-    return auc, acc
+    auc, acc = performance(torch.cat(labels), torch.cat(predictions))
+    return (auc, acc, details) if collect else (auc, acc)
