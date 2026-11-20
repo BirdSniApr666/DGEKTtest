@@ -1,0 +1,11 @@
+{
+  "manifest_version": 3,
+  "name": "Cloud Studio 训练结束提醒与关页",
+  "version": "1.0.0",
+  "description": "训练结束后关闭所选 Cloud Studio 应用的编辑页和学习页。",
+  "minimum_chrome_version": "120",
+  "permissions": ["activeTab", "alarms", "scripting", "storage"],
+  "host_permissions": ["https://cloudstudio.net/*"],
+  "background": { "service_worker": "background.js" },
+  "action": { "default_popup": "popup.html" }
+}

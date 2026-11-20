@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<title>Cloud Studio 训练监控</title>
+<style>
+  body { min-width: 290px; margin: 16px; font: 14px/1.5 system-ui, sans-serif; color-scheme: light dark; }
+  p { margin: 0 0 12px; }
+  select { display: block; margin: 6px 0 12px; max-width: 310px; width: 100%; }
+  button { display: block; margin-top: 12px; padding: 4px 10px; }
+  [hidden] { display: none; }
+</style>
+<p id="status" role="status"></p>
+<form id="setup" hidden>
+  <label for="app">训练结束后关闭的应用</label>
+  <select id="app" required></select>
+  <label><input type="checkbox" id="stop-on-failure" checked> 训练异常退出时也关闭</label>
+  <button type="submit">开始监控</button>
+</form>
+<button id="cancel" type="button" hidden>取消监控</button>
+<script src="popup.js"></script>
+</html>

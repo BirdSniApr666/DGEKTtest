@@ -70,6 +70,30 @@ prediction CSV's `prob_mean` is the probability used for both reported metrics.
 Re-evaluate the static control with this version: it excludes padding in
 one-interaction tail chunks that older metrics counted as incorrect answers.
 
+## Cloud Studio 训练结束后自动释放算力
+
+训练包装脚本在子进程退出后用端口预览发布状态。本机浏览器扩展读取状态后，会关闭所选应用在当前浏览器中的编辑页和学习页。Cloud Studio 通常在所有此类页面都关闭后约 10 分钟释放算力。[Cloud Studio 机时说明](https://ide.cloud.tencent.com/docs/guide/billing/machine_time/compute-time-introduction/)
+
+1. 在本机 Chrome 打开 `chrome://extensions`，或在 Edge 打开 `edge://extensions`。开启开发者模式，点击「加载已解压的扩展程序」，选择本仓库的 `scripts/cloudstudio-browser` 目录。
+2. 将 `scripts/cloudstudio_train.py` 同步到 Cloud Studio 的仓库。在云端 IDE 终端进入仓库根目录，用包装脚本在前台启动原训练命令。下面的示例会等到训练、测试和预测导出都完成。
+
+   ```bash
+   python scripts/cloudstudio_train.py -- python -u -m KnowledgeTracing.evaluation.run --dataset assist2017 --stage all --epochs 20
+   ```
+
+3. 在云端 IDE 的端口面板找到 `8765`，将访问权限设为「仅自己可见」，然后点「在浏览器中打开」。预览中会显示状态 JSON。[Cloud Studio 端口预览说明](https://ide.cloud.tencent.com/docs/guide/code_editing/productivity_plugin/port-plug/)
+4. 在预览标签页点击扩展图标，选中对应应用并点「开始监控」。默认异常退出也会关页，可取消勾选。保存同一应用里的编辑内容并确认没有其他任务还在运行。
+
+训练期间保持本机唤醒、浏览器联网和预览标签页打开。若浏览器启用了内存节省或睡眠标签页，将 Cloud Studio 编辑页和预览页加入保持活动的列表。其他设备或浏览器配置中同一应用的编辑页和学习页也需要关闭。确认释放可看 Buddy Academy 的「应用管理」。如果工作空间设了「定时关机」，确认剩余时间足够跑完整个任务。[Cloud Studio 定时关机说明](https://ide.cloud.tencent.com/docs/guide/code_editing/basic_operations/auto-shutdown/)
+
+训练的模型、指标和项目日志仍写入原路径。包装脚本在训练退出后继续提供状态，便于浏览器读到最终结果。手动结束这个等待时，在云端终端按 `Ctrl+C`。
+
+首次可以把训练命令换成下面的短任务，先验证关页流程：
+
+```bash
+python scripts/cloudstudio_train.py -- python -c 'import time; time.sleep(90)'
+```
+
 ## Hyperparameter Settings
 
 `/KnowledgeTracing/Constant/Constants.py` is specially used to set super parameters, all parameters of the whole model can be set in this file.
