@@ -27,7 +27,7 @@ from torch import optim as optima
 
 from KnowledgeTracing.Constant import Constants as C
 from KnowledgeTracing.DirectedGCN.load_data import get_adj
-from KnowledgeTracing.hgnn_models import hypergraph_utils as hgut
+from KnowledgeTracing.hgnn_models import difficulty, hypergraph_utils as hgut
 from KnowledgeTracing.model.Model import DKT
 from KnowledgeTracing.evaluation import eval as kt_eval
 
@@ -78,7 +78,20 @@ def build_model(device: torch.device):
     """
     incidence = pd.read_csv(C.H_PATH, header=None, dtype=np.float32).to_numpy()
     q, k = C.NUM_OF_QUESTIONS, C.NUM_OF_CONCEPTS
-    if incidence.shape == (q, k):
+    cahg_config = {}
+    if C.CAHG == 'difficulty':
+        incidence, stats = difficulty.build_difficulty_incidence(incidence, q, k, C.TRAIN_PATH)
+        cahg_config = {
+            'cahg': 'difficulty', 'cahg_estimator': 'all_attempts_smoothed_error_v1',
+            'cahg_clustering': 'optimal_1d_sse', 'cahg_clusters': difficulty.MAX_CLUSTERS,
+            'cahg_smoothing': difficulty.SMOOTHING,
+        }
+        summary = (f"[CAHG difficulty] split_concepts={stats['split_concepts']}, "
+                   f"single_concepts={stats['single_concepts']}, "
+                   f"incidence={incidence.shape}, nnz={incidence.nnz}")
+        logger.info(summary)
+        print(summary)
+    elif incidence.shape == (q, k):
         incidence = sparse.csr_matrix(incidence)
         incidence = sparse.block_diag([incidence, incidence], format='csr')
     elif incidence.shape != (2*q, 2*k):
@@ -90,7 +103,8 @@ def build_model(device: torch.device):
                 personal_alpha=alpha).to(device)
     # The population prior and CAHG are rebuilt from these files on each run.
     model.graph_config = {'dataset': C.DATASET, 'transition': C.TRANSITION, 'alpha': alpha,
-                          'train_sha256': file_sha256(C.TRAIN_PATH), 'h_sha256': file_sha256(C.H_PATH)}
+                          'train_sha256': file_sha256(C.TRAIN_PATH), 'h_sha256': file_sha256(C.H_PATH),
+                          **cahg_config}
     return model
 
 
@@ -135,7 +149,9 @@ def load_checkpoint(path: str, model, optimizer=None):
     # 用 cpu 作为 map_location：避免把 RNG state 等非参数张量也搬到 GPU，
     # load_state_dict 会自动对齐到模型所在设备。
     state = torch.load(path, map_location='cpu', weights_only=False)
-    saved_config = state.get('graph_config') if isinstance(state, dict) else None
+    saved_config = state.get('graph_config') if isinstance(state, dict) else getattr(state, 'graph_config', None)
+    if saved_config is None and getattr(model, 'graph_config', {}).get('cahg') == 'difficulty':
+        raise ValueError('Legacy checkpoints use the original CAHG; choose --cahg original.')
     if saved_config is None and model.personal_alpha is not None:
         raise ValueError('Legacy checkpoints use the static graph; choose --transition static.')
     if saved_config is not None and saved_config != model.graph_config:

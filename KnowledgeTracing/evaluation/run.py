@@ -45,6 +45,8 @@ def parse_args(argv=None):
     parser.add_argument('--dataset', choices=('assist2009', 'assist2017'), help='默认 assist2017')
     parser.add_argument('--transition', choices=('static', 'personal'),
                         help='static 为共享转移图，personal 为固定先验强度的个人前缀图')
+    parser.add_argument('--cahg', choices=('original', 'difficulty'), default='original',
+                        help='默认 original；difficulty 按题目难度将每条概念超边分为至多两组')
     parser.add_argument('--alpha', type=float, help='个人图群体先验的伪计数，默认 5')
     parser.add_argument('--h-file', help='题目—知识点关联矩阵 CSV 的路径')
     parser.add_argument('--device', choices=('cpu', 'cuda'), help='默认优先使用 CUDA')
@@ -87,10 +89,10 @@ def resolve_resume(value):
 def main(argv=None):
     args = parse_args(argv)
 
-    if args.dataset is not None or args.transition is not None:
+    if args.dataset is not None or args.transition is not None or args.cahg == 'difficulty':
         C.configure_experiment(args.dataset or 'assist2017', args.transition or 'static',
                                5.0 if args.alpha is None else args.alpha,
-                               216 if args.seed is None else args.seed)
+                               216 if args.seed is None else args.seed, cahg=args.cahg)
     C.apply_overrides(
         EPOCH=args.epochs,
         LR=args.lr,
@@ -120,10 +122,11 @@ def main(argv=None):
         torch.cuda.set_device(0)
     pipeline.set_seed(C.SEED)
 
-    logger.info('Dataset=%s | Q=%d | MAX_STEP=%d | BATCH=%d | LR=%g | EPOCH=%d',
-                C.DATASET, C.NUM_OF_QUESTIONS, C.MAX_STEP, C.BATCH_SIZE, C.LR, C.EPOCH)
+    logger.info('Dataset=%s | Transition=%s | CAHG=%s | Q=%d | MAX_STEP=%d | BATCH=%d | LR=%g | EPOCH=%d',
+                C.DATASET, C.TRANSITION, C.CAHG, C.NUM_OF_QUESTIONS, C.MAX_STEP, C.BATCH_SIZE, C.LR, C.EPOCH)
     print(f'Device: {torch.cuda.get_device_name(0) if device.type == "cuda" else device}')
-    print(f'Dataset: {C.DATASET} | Transition: {C.TRANSITION} | Questions: {C.NUM_OF_QUESTIONS} | EPOCH: {C.EPOCH}')
+    print(f'Dataset: {C.DATASET} | Transition: {C.TRANSITION} | CAHG: {C.CAHG} | '
+          f'Questions: {C.NUM_OF_QUESTIONS} | EPOCH: {C.EPOCH}')
 
     loader_options = {'indexed': True, 'personal': C.TRANSITION == 'personal'}
     train_loader = getTrainLoader(C.TRAIN_PATH, **loader_options) if args.stage in ('train', 'all') else None
