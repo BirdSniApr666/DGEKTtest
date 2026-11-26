@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""DGEKT 统一命令行入口。
+"""DGEKT 统一命令行入口。   # Modified 11.26
 
 用法示例::
 
