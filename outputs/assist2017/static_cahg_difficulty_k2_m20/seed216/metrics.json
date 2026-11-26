@@ -1,0 +1,33 @@
+{
+  "checkpoint": "/workspace/KnowledgeTracing/model/checkpoints/assist2017/static_cahg_difficulty_k2_m20/seed216/best.pt",
+  "test_auc": 0.7739350505374554,
+  "test_acc": 0.7193818355291444,
+  "config": {
+    "dataset": "assist2017",
+    "graph": {
+      "dataset": "assist2017",
+      "transition": "static",
+      "alpha": null,
+      "train_sha256": "f9a09e6542fd22e2ea62f5c3c1e4b0ee44f71a131ae7c2e9e1cf123c4cb84496",
+      "h_sha256": "ac29a7d9bc296f0181ece1173069424853a50db492bba956baac7d80ecb86107",
+      "cahg": "difficulty",
+      "cahg_estimator": "all_attempts_smoothed_error_v1",
+      "cahg_clustering": "optimal_1d_sse",
+      "cahg_clusters": 2,
+      "cahg_smoothing": 20
+    },
+    "num_questions": 3162,
+    "max_step": 50,
+    "batch_size": 128,
+    "lr": 0.001,
+    "emb": 256,
+    "hidden": 128,
+    "layers": 1,
+    "kd_loss": 5e-06,
+    "epochs_cfg": 20,
+    "train_path": "/workspace/Dataset/assist2017/split_seed216/train.csv",
+    "valid_path": "/workspace/Dataset/assist2017/split_seed216/valid.csv",
+    "test_path": "/workspace/Dataset/assist2017/assist2017_pid_test.csv"
+  },
+  "test_chunks": 3630
+}
